@@ -14,6 +14,7 @@ class UserController extends AbstractController
     #[Route('/add-user', name: 'add_user', methods: ['GET'])]
     public function addUser(UserPasswordHasherInterface $userPasswordHasher, EntityManagerInterface $entityManager): JsonResponse
     {
+        die('ok');
         
         $user = new User();
         $user->setName('Admin');
