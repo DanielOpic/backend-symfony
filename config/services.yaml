@@ -11,6 +11,11 @@ services:
         autowire: true      # Automatically injects dependencies in your services.
         autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
 
+    # ExceptionListener
+    App\EventListener\ExceptionListener:
+        tags:
+            - { name: 'kernel.event_listener', event: 'kernel.exception', method: 'onKernelException' }
+
     # Manually define the UserPasswordHasherInterface
     Symfony\Component\PasswordHasher\PasswordHasherInterface: '@security.password_hasher'
 
@@ -31,3 +36,5 @@ services:
     
 
     # Add more service definitions here as needed
+
+    

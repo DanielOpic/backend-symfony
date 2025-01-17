@@ -1,168 +1,214 @@
 <?php
-
 namespace App\Controller\Api;
 
 use DateTime;
-
+use App\DTO\ExperienceDTO;
 use App\Entity\Experience;
+use App\Service\ExperienceService;
 use App\Service\TokenService;
-
+use App\Service\JsonResponseService;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
-
 use Symfony\Component\HttpFoundation\JsonResponse;
-use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\HttpFoundation\Request;
-
+use Symfony\Component\Routing\Annotation\Route;
+use Symfony\Component\Validator\Validator\ValidatorInterface;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 use Doctrine\ORM\EntityManagerInterface;
-
-use Lexik\Bundle\JWTAuthenticationBundle\Services\JWTTokenManagerInterface;
+use Doctrine\ORM\Tools\Pagination\Paginator;
+use Psr\Log\LoggerInterface;
 
 
 class ExperienceController extends AbstractController
 {
-    #[Route('/api/experience', name: 'api_experience', methods: ['GET'])]
-    public function getExperience(EntityManagerInterface $entityManager): JsonResponse
+    private JsonResponseService $jsonResponseService;
+    private TokenService $tokenService;
+    private ExperienceService $experienceService;
+    private ValidatorInterface $validator;
+    private LoggerInterface $logger;
+
+    // Wstrzykiwanie serwisów w konstruktorze
+    public function __construct(
+        JsonResponseService $jsonResponseService,
+        TokenService $tokenService,
+        ExperienceService $experienceService,
+        ValidatorInterface $validator,
+        LoggerInterface $logger
+    )
     {
-        // Pobieramy dane o doświadczeniach z bazy danych
-        $experiences = $entityManager->getRepository(Experience::class)->findBy(
-            [],
-            ['fromdate' => 'DESC'] // Sortowanie po polu Fromdate malejąco
-        );
-
-        // Tworzymy tablicę wyników
-        $data = [];
-
-        // Zbieramy dane z encji do formatu tablicy
-        foreach ($experiences as $experience) {
-            $data[] = [
-                'id'            => $experience->getId(),
-                'name'          => $experience->getName(),
-                'company'       => $experience->getCompany(),
-                'fromdate'      => $experience->getFromdate()->format('Y-m-d'),
-                'todate'        => $experience->getTodate()->format('Y-m-d'),
-                'current'       => $experience->getCurrent(),
-                'description'   => $experience->getDescription(),
-            ];
-        }
-
-        return new JsonResponse($data);
+        $this->jsonResponseService = $jsonResponseService;
+        $this->tokenService = $tokenService;
+        $this->experienceService = $experienceService;
+        $this->validator = $validator;
+        $this->logger = $logger;
     }
 
-    #[Route('/api/read-experience/{id}', name: 'api_cms_read_experience', methods: ['GET'])]
-    public function getCmsReadExperience(
-        int $id,
-        EntityManagerInterface $entityManager
-    ): JsonResponse {
-        $experience = $entityManager->getRepository(Experience::class)->find($id);
-
-        if ($experience) {
-            $data = [
-                'id'            => $experience->getId(),
-                'name'          => $experience->getName(),
-                'company'       => $experience->getCompany(),
-                'fromdate'      => $experience->getFromdate()->format('Y-m-d'),
-                'todate'        => $experience->getTodate()->format('Y-m-d'),
-                'current'       => $experience->getCurrent(),
-                'description'   => $experience->getDescription(),
-            ];
-            return new JsonResponse($data);
-        }
-
-        return new JsonResponse(['message' => 'Experience not found'], 404);
+    // Pomocnicza metoda do generowania odpowiedzi JSON
+    private function createJsonResponseWithData(array $data, int $statusCode = 200): JsonResponse
+    {
+        return $this->jsonResponseService->createJsonResponse($data, $statusCode);
     }
 
-    /* ------------------------------------------*/
-    /* --- CMS edit --- */
-    /* ------------------------------------------*/
+    #[Route('/api/experience', name: 'api_experience', methods: ['GET'])]
+    public function getExperience(Request $request): JsonResponse
+    {
+        try {
+            // Parametry do paginacji
+            $page = $request->query->getInt('page', 1); // domyślnie strona 1
+            $limit = $request->query->getInt('limit', 50); // domyślnie 10 elementów na stronę
+
+            // Pobieramy dane z paginacją
+            $experiencesQuery = $this->experienceService->findAllOrderedByFromDateQuery(); // Zakładam, że masz tę metodę w service
+
+            // Paginacja
+            $paginator = new Paginator($experiencesQuery);
+            $paginator->getQuery()
+                ->setFirstResult(($page - 1) * $limit) // Początkowy element
+                ->setMaxResults($limit); // Limit na stronę
+
+            $totalCount = count($paginator); // Całkowita liczba elementów
+            $experiences = iterator_to_array($paginator);
+
+            $data = [];
+            foreach ($experiences as $experience) {
+                $data[] = [
+                    'id'          => $experience->getId(),
+                    'name'        => $experience->getName(),
+                    'company'     => $experience->getCompany(),
+                    'fromdate'    => $experience->getFromdate()?->format('Y-m-d'),
+                    'todate'      => $experience->getTodate()?->format('Y-m-d'),
+                    'current'     => $experience->getCurrent(),
+                    'description' => $experience->getDescription(),
+                ];
+            }
+
+            // Dodajemy informacje o paginacji w odpowiedzi
+            return $this->createJsonResponseWithData([
+                'data' => $data,
+                'pagination' => [
+                    'current_page' => $page,
+                    'total_pages'  => ceil($totalCount / $limit),
+                    'total_count'  => $totalCount,
+                    'limit'        => $limit
+                ]
+            ]);
+        } catch (\Exception $e) {
+            $this->logger->error('Error fetching experiences: ' . $e->getMessage());
+            return $this->createJsonResponseWithData(['message' => 'Error fetching experiences'], 500);
+        }
+    }
 
     #[Route('/api/cms-edit-experience', name: 'api_cms_edit_experience', methods: ['PUT'])]
-    public function getCmsEditExperience(
-        Request $request,
-        EntityManagerInterface $entityManager,
-        TokenService $tokenService // Wstrzykujemy TokenService
-    ): JsonResponse {
-        // Pobieramy token z nagłówka Authorization
-        $token = $request->headers->get('Authorization');
-    
-        // Jeśli token nie jest przesyłany w nagłówku, zwracamy błąd
-        if (!$token) {
-            return new JsonResponse(['message' => 'Token not provided'], 400);
-        }
-    
-        // Usuwamy prefix "Bearer " (jeśli jest) z tokena
-        $token = str_replace('Bearer ', '', $token);
-    
-        // Używamy TokenService do weryfikacji tokena
-        $decodedToken = $tokenService->parseToken($token);
-    
-        // Jeśli token jest niepoprawny, zwracamy błąd
-        if (!$decodedToken) {
-            return new JsonResponse(['message' => 'Unauthorized'], 401);
-        }
-    
-        // Token jest poprawny, kontynuujemy logikę
-        $data = json_decode($request->getContent(), true);
-    
-        if (isset($data['id']) && $data['id'] > 0) {
-            $experience = $entityManager->getRepository(Experience::class)->find($data['id']);
-            if (!$experience) {
-                return new JsonResponse(['message' => 'Experience not found'], 404);
+    public function getCmsEditExperience(Request $request): JsonResponse
+    {
+        try {
+
+            $token = $request->headers->get('Authorization');
+            if (!$this->tokenService->validateToken($token)) {
+                return $this->createJsonResponseWithData(['message' => 'Unauthorized'], 401);
             }
-        } else {
-            $experience = new Experience();
+            
+            // Dekodowanie danych wejściowych
+            $data = json_decode($request->getContent(), true);
+            $experienceDTO = new ExperienceDTO();
+            $experienceDTO->name = $data['name'];
+            $experienceDTO->company = $data['company'];
+            $experienceDTO->fromdate = $data['fromdate'];
+            $experienceDTO->todate = $data['todate'];
+            $experienceDTO->current = $data['current'];
+            $experienceDTO->description = $data['description'];
+
+            // Walidacja DTO
+            $errors = $this->validator->validate($experienceDTO);
+
+            if (count($errors) > 0) {
+                $errorMessages = [];
+                foreach ($errors as $error) {
+                    $errorMessages[] = $error->getMessage();
+                }
+                $this->logger->warning('Validation errors: ' . implode(', ', $errorMessages));
+                return $this->createJsonResponseWithData(['errors' => $errorMessages], 400);
+            }
+
+            // Jeśli brak błędów, wykonujemy operację
+            $experience = (isset($data['id']) && $data['id'] > 0) ? $this->experienceService->findById($data['id']) : new Experience();
+
+            if (!$experience) {
+                $this->logger->error('Experience not found for id: ' . $data['id']);
+                throw new NotFoundHttpException('Experience not found');
+            }
+
+            $experience->setName($experienceDTO->name);
+            $experience->setCompany($experienceDTO->company);
+            $experience->setFromdate(new DateTime($experienceDTO->fromdate));
+            $experience->setTodate(new DateTime($experienceDTO->todate));
+            $experience->setCurrent($experienceDTO->current);
+            $experience->setDescription($experienceDTO->description);
+
+            $this->experienceService->saveExperience($experience);
+
+            return $this->createJsonResponseWithData(['message' => 'Experience saved successfully'], 201);
+        } catch (\Exception $e) {
+            $this->logger->error('Error editing experience: ' . $e->getMessage());
+            return $this->createJsonResponseWithData(['message' => 'Error editing experience'], 500);
         }
-    
-        $experience->setName($data['name']);
-        $experience->setCompany($data['company']);
-        $experience->setFromdate(new DateTime($data['fromdate']));
-        $experience->setTodate(new DateTime($data['todate']));
-        $experience->setCurrent($data['current']);
-        $experience->setDescription($data['description']);
-    
-        $entityManager->persist($experience);
-        $entityManager->flush();
-    
-        return new JsonResponse(['message' => 'Experience saved successfully'], 201);
     }
 
     #[Route('/api/cms-delete-experience/{id}', name: 'api_cms_delete_experience', methods: ['DELETE'])]
-    public function deleteCmsExperience(
-        int $id,
-        Request $request,
-        EntityManagerInterface $entityManager,
-        TokenService $tokenService // Wstrzykujemy TokenService
-    ): JsonResponse {
-        // Pobieramy token z nagłówka Authorization
-        $token = $request->headers->get('Authorization');
+    public function deleteCmsExperience(Request $request, int $id): JsonResponse
+    {
+        try {
+            // Pobieramy token z nagłówka
+            $token = $request->headers->get('Authorization');
+            
+            // Weryfikujemy token
+            if (!$this->tokenService->validateToken($token)) {
+                return $this->createJsonResponseWithData(['message' => 'Unauthorized'], 401);
+            }
+            
+            // Znajdź doświadczenie po ID
+            $experience = $this->experienceService->findById($id);
 
-        // Jeśli token nie jest przesyłany w nagłówku, zwracamy błąd
-        if (!$token) {
-            return new JsonResponse(['message' => 'Token not provided'], 400);
+            if (!$experience) {
+                $this->logger->error('Experience not found for id: ' . $id);
+                return $this->createJsonResponseWithData(['message' => 'Experience not found'], 404);
+            }
+
+            // Usuwamy doświadczenie
+            $this->experienceService->deleteExperience($experience);
+
+            return $this->createJsonResponseWithData(['message' => 'Experience deleted successfully'], 200);
+        } catch (\Exception $e) {
+            $this->logger->error('Error deleting experience: ' . $e->getMessage());
+            return $this->createJsonResponseWithData(['message' => 'Error deleting experience'], 500);
         }
-
-        // Usuwamy prefix "Bearer " (jeśli jest) z tokena
-        $token = str_replace('Bearer ', '', $token);
-
-        // Używamy TokenService do weryfikacji tokena
-        $decodedToken = $tokenService->parseToken($token);
-
-        // Jeśli token jest niepoprawny, zwracamy błąd
-        if (!$decodedToken) {
-            return new JsonResponse(['message' => 'Unauthorized'], 401);
-        }
-
-        // Token jest poprawny, kontynuujemy logikę
-        $experience = $entityManager->getRepository(Experience::class)->find($id);
-
-        if (!$experience) {
-            return new JsonResponse(['message' => 'Experience not found'], 404);
-        }
-
-        $entityManager->remove($experience);
-        $entityManager->flush();
-
-        return new JsonResponse(['message' => 'Experience deleted successfully'], 200);
     }
 
-    
+    #[Route('/api/read-experience/{id}', name: 'api_cms_read_experience', methods: ['GET'])]
+    public function getCmsReadExperience(int $id): JsonResponse
+    {
+        try {
+            $experience = $this->experienceService->findById($id);
+
+            if (!$experience) {
+                $this->logger->error('Experience not found for id: ' . $id);
+                return $this->createJsonResponseWithData(['message' => 'Experience not found'], 404);
+            }
+
+            $data = [
+                'id'          => $experience->getId(),
+                'name'        => $experience->getName(),
+                'company'     => $experience->getCompany(),
+                'fromdate'    => $experience->getFromdate()?->format('Y-m-d'),
+                'todate'      => $experience->getTodate()?->format('Y-m-d'),
+                'current'     => $experience->getCurrent(),
+                'description' => $experience->getDescription(),
+            ];
+
+            return $this->createJsonResponseWithData($data);
+        } catch (\Exception $e) {
+            $this->logger->error('Error reading experience: ' . $e->getMessage());
+            return $this->createJsonResponseWithData(['message' => 'Error reading experience'], 500);
+        }
+    }
 }
