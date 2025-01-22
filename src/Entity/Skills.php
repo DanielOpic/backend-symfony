@@ -13,19 +13,19 @@ class Skills
     #[ORM\Column(type: 'integer')]
     private ?int $id = null;
 
-    #[ORM\ManyToOne(targetEntity: SkillsType::class)]
+    #[ORM\ManyToOne(targetEntity: SkillsType::class, inversedBy: 'skills')]
     #[ORM\JoinColumn(nullable: false, onDelete: "CASCADE")]
     private SkillsType $skillsType;
 
     #[ORM\Column(type: 'string', length: 250)]
     private string $name;
 
-    #[ORM\Column(type: 'string', length: 100)]
-    private string $fa;
+    #[ORM\Column(type: 'string', length: 100, nullable: true)]
+    private ?string $fa = null;
 
     public function getId(): ?int
     {
-        return $id;
+        return $this->id;
     }
 
     public function getSkillsType(): SkillsType
@@ -36,6 +36,7 @@ class Skills
     public function setSkillsType(SkillsType $skillsType): self
     {
         $this->skillsType = $skillsType;
+
         return $this;
     }
 
@@ -47,10 +48,11 @@ class Skills
     public function setName(string $name): self
     {
         $this->name = $name;
+
         return $this;
     }
 
-    public function getFa(): string
+    public function getFa(): string|null
     {
         return $this->fa;
     }
@@ -58,6 +60,7 @@ class Skills
     public function setFa(string $fa): self
     {
         $this->fa = $fa;
+
         return $this;
     }
 }
